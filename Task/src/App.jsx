@@ -1,64 +1,121 @@
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import './App.css'
 
-const API_URL = 'http://localhost:5000/api/tasks'
+// Deployed Render backend API
+const API_URL = 'https://taskmate-backend-vgg8.onrender.com/api/tasks'
 
-const initialTasks = []
+function normalizeTask(task) {
+  return {
+    ...task,
+    id: String(task._id || task.task_id || task.id || ''),
+    title: task.title || '',
+    description: task.description || '',
+    completed: Boolean(task.completed),
+    status: task.completed ? 'Completed' : 'Pending',
+    subject: task.subject || 'General',
+    due: task.due || task.dueDate || '',
+  }
+}
+
+async function readResponse(response) {
+  const text = await response.text()
+
+  let data = {}
+
+  if (text) {
+    try {
+      data = JSON.parse(text)
+    } catch {
+      data = { message: text }
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      data.message || data.error || `Request failed (${response.status})`
+    )
+  }
+
+  return data
+}
+
+async function apiRequest(url, options = {}) {
+  let response
+
+  try {
+    response = await fetch(url, options)
+  } catch (error) {
+    console.error('API network error:', error)
+
+    throw new Error(
+      'Backend se connection nahi ho raha. API URL aur CORS configuration check karein.'
+    )
+  }
+
+  return readResponse(response)
+}
 
 function App() {
   const [page, setPage] = useState('home')
-  const [tasks, setTasks] = useState(initialTasks)
+  const [tasks, setTasks] = useState([])
   const [selected, setSelected] = useState(null)
   const [showForm, setShowForm] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
 
   const [form, setForm] = useState({
     title: '',
     subject: '',
     due: '',
-    description: ''
+    description: '',
   })
 
-  // Backend se tasks load karna
-  async function loadTasks() {
+  // Load tasks from the deployed backend
+  const loadTasks = useCallback(async (showLoading = true) => {
+    if (showLoading) {
+      setLoading(true)
+    }
+
+    setError('')
+
     try {
-      setError('')
-      const response = await fetch(API_URL)
+      const data = await apiRequest(API_URL)
+      const taskArray = Array.isArray(data)
+        ? data
+        : Array.isArray(data.value)
+          ? data.value
+          : Array.isArray(data.tasks)
+            ? data.tasks
+            : []
 
-      if (!response.ok) {
-        throw new Error('Tasks load nahi ho sake.')
-      }
-
-      const data = await response.json()
-
-     setTasks((Array.isArray(data) ? data : data.value).map(task => ({
-  ...task,
-  id: String(task._id || task.task_id || task.id || ''),
-  status: task.completed ? 'Completed' : 'Pending',
-  subject: task.subject || 'General',
-  due: task.due || ''
-})))
-
+      setTasks(taskArray.map(normalizeTask))
     } catch (err) {
-      setError('Backend se connection nahi ho raha. Check karo ki server port 5000 par chal raha hai.')
-      console.error(err)
+      console.error('Load tasks error:', err)
+      setError(err.message || 'Tasks load nahi ho sake.')
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
 
   useEffect(() => {
     loadTasks()
-  }, [])
+  }, [loadTasks])
 
   function openTask(task) {
     setSelected(task)
     setPage('details')
   }
 
-  // Naya task create karna
+  function updateForm(field, value) {
+    setForm(previous => ({
+      ...previous,
+      [field]: value,
+    }))
+  }
+
+  // Create a new task
   async function saveTask(e) {
     e.preventDefault()
 
@@ -67,43 +124,48 @@ function App() {
       return
     }
 
+    setSaving(true)
+    setError('')
+
     try {
-      const response = await fetch(API_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          title: form.title.trim(),
-          description: form.description,
-          completed: false
-        })
-      })
+      const payload = {
+        title: form.title.trim(),
+        description: form.description.trim(),
+        completed: false,
 
-      const result = await response.json()
-
-      if (!response.ok) {
-        throw new Error(result.message || 'Task create nahi hua.')
+        // These fields are saved only if the backend schema supports them.
+        subject: form.subject.trim(),
+        due: form.due,
       }
 
-      await loadTasks()
+      await apiRequest(API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      })
+
+      await loadTasks(false)
 
       setForm({
         title: '',
         subject: '',
         due: '',
-        description: ''
+        description: '',
       })
 
       setShowForm(false)
       setPage('dashboard')
-
     } catch (err) {
-      alert(err.message)
+      console.error('Save task error:', err)
+      alert(err.message || 'Task save nahi hua.')
+    } finally {
+      setSaving(false)
     }
   }
 
-  // Task complete ya pending karna
+  // Toggle a task between pending and completed
   async function toggleTask(id) {
     const task = tasks.find(item => item.id === id)
 
@@ -112,36 +174,32 @@ function App() {
     const completed = !task.completed
 
     try {
-      const response = await fetch(`${API_URL}/${id}`, {
+      await apiRequest(`${API_URL}/${encodeURIComponent(id)}`, {
         method: 'PUT',
         headers: {
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ completed })
+        body: JSON.stringify({ completed }),
       })
 
-      const result = await response.json()
+      await loadTasks(false)
 
-      if (!response.ok) {
-        throw new Error(result.message || 'Task update nahi hua.')
-      }
+      setSelected(previous => {
+        if (!previous || previous.id !== id) return previous
 
-      await loadTasks()
-
-      if (selected?.id === id) {
-        setSelected({
-          ...selected,
+        return {
+          ...previous,
           completed,
-          status: completed ? 'Completed' : 'Pending'
-        })
-      }
-
+          status: completed ? 'Completed' : 'Pending',
+        }
+      })
     } catch (err) {
-      alert(err.message)
+      console.error('Update task error:', err)
+      alert(err.message || 'Task update nahi hua.')
     }
   }
 
-  // Task delete karna
+  // Delete a task
   async function deleteTask(id) {
     const confirmDelete = window.confirm(
       'Kya tum sach mein yeh task delete karna chahte ho?'
@@ -150,22 +208,17 @@ function App() {
     if (!confirmDelete) return
 
     try {
-      const response = await fetch(`${API_URL}/${id}`, {
-        method: 'DELETE'
+      await apiRequest(`${API_URL}/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
       })
-
-      const result = await response.json()
-
-      if (!response.ok) {
-        throw new Error(result.message || 'Task delete nahi hua.')
-      }
 
       setSelected(null)
       setPage('dashboard')
-      await loadTasks()
 
+      await loadTasks(false)
     } catch (err) {
-      alert(err.message)
+      console.error('Delete task error:', err)
+      alert(err.message || 'Task delete nahi hua.')
     }
   }
 
@@ -247,13 +300,19 @@ function App() {
                 <span className="live-dot">Today</span>
               </div>
 
-              <h2>{completed} of {tasks.length} tasks completed</h2>
+              <h2>
+                {completed} of {tasks.length} tasks completed
+              </h2>
 
               <div className="progress-track">
                 <div
                   className="progress-fill"
                   style={{
-                    width: `${tasks.length ? completed / tasks.length * 100 : 0}%`
+                    width: `${
+                      tasks.length
+                        ? (completed / tasks.length) * 100
+                        : 0
+                    }%`,
                   }}
                 />
               </div>
@@ -263,6 +322,7 @@ function App() {
                   <strong>{pending}</strong>
                   <span>Pending</span>
                 </div>
+
                 <div>
                   <strong>{completed}</strong>
                   <span>Completed</span>
@@ -298,7 +358,15 @@ function App() {
             </div>
 
             {error && (
-              <p className="error-message">{error}</p>
+              <div className="error-message" role="alert">
+                <p>{error}</p>
+                <button
+                  type="button"
+                  onClick={() => loadTasks()}
+                >
+                  Retry
+                </button>
+              </div>
             )}
 
             <div className="stats-grid">
@@ -330,9 +398,7 @@ function App() {
                   <input
                     type="text"
                     value={form.title}
-                    onChange={e =>
-                      setForm({ ...form, title: e.target.value })
-                    }
+                    onChange={e => updateForm('title', e.target.value)}
                     placeholder="e.g. Complete assignment"
                     required
                   />
@@ -343,9 +409,7 @@ function App() {
                   <input
                     type="text"
                     value={form.subject}
-                    onChange={e =>
-                      setForm({ ...form, subject: e.target.value })
-                    }
+                    onChange={e => updateForm('subject', e.target.value)}
                     placeholder="e.g. Computer Science"
                   />
                 </label>
@@ -355,9 +419,7 @@ function App() {
                   <input
                     type="date"
                     value={form.due}
-                    onChange={e =>
-                      setForm({ ...form, due: e.target.value })
-                    }
+                    onChange={e => updateForm('due', e.target.value)}
                   />
                 </label>
 
@@ -366,14 +428,18 @@ function App() {
                   <textarea
                     value={form.description}
                     onChange={e =>
-                      setForm({ ...form, description: e.target.value })
+                      updateForm('description', e.target.value)
                     }
                     placeholder="What do you need to do?"
                   />
                 </label>
 
-                <button className="primary-btn" type="submit">
-                  Save Task
+                <button
+                  className="primary-btn"
+                  type="submit"
+                  disabled={saving}
+                >
+                  {saving ? 'Saving...' : 'Save Task'}
                 </button>
               </form>
             )}
@@ -383,6 +449,7 @@ function App() {
                 <h2>My assignments</h2>
                 <p>Click a task to see its details.</p>
               </div>
+
               <span>{tasks.length} tasks</span>
             </div>
 
@@ -412,9 +479,12 @@ function App() {
                       className="task-info"
                       onClick={() => openTask(task)}
                     >
-                      <strong className={task.completed ? 'task-done' : ''}>
+                      <strong
+                        className={task.completed ? 'task-done' : ''}
+                      >
                         {task.title}
                       </strong>
+
                       <span>
                         {task.subject || 'General'}
                         {task.due ? ` · Due ${task.due}` : ''}
@@ -480,9 +550,7 @@ function App() {
 
               <div className="detail-item">
                 <strong>Description</strong>
-                <p>
-                  {selected.description || 'No description added.'}
-                </p>
+                <p>{selected.description || 'No description added.'}</p>
               </div>
 
               <div className="detail-actions">
